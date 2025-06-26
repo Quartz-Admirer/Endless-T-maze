@@ -496,3 +496,13 @@ class MultiHeadAttention(nn.Module):
         output = self.dense(concat_attention)
         
         return output, attention_weights
+
+def get_activation_fn(activation):
+    if activation == "relu":
+        return nn.ReLU()
+    elif activation == "gelu":
+        return nn.GELU()
+    elif activation == "tanh":
+        return nn.Tanh()
+    else:
+        raise ValueError("Activation function not supported: {}".format(activation))

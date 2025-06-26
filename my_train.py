@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 import os
+import math
 
 from RATE.RATE_model import RATE
 from datacollect import load_trajectories
@@ -99,6 +100,24 @@ def train():
     )
     
     model.train()
+
+    # Scheduler: warm-up then cosine decay (mirrors original RATE implementation)
+    warmup_steps = config["training"]["warmup_steps"]
+    final_tokens = config["training"]["final_tokens"]  # total tokens over which lr decays to lr_end_factor
+    lr_end_factor = config["training"]["lr_end_factor"]
+    batch_size = config["training"]["batch_size"]
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        # after warm-up: cosine decay to lr_end_factor
+        progress = (current_step - warmup_steps) / float(max(1, final_tokens // (batch_size * context_length) - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return lr_end_factor + (1.0 - lr_end_factor) * cosine_decay
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     tokens_processed = 0
     
     for epoch in range(config["training"]["epochs"]):
@@ -112,13 +131,6 @@ def train():
             
             batch_size = states.size(0)
             blocks_context = config["training"]["context_length"]
-            
-            last_segment_with_data = -1
-            if config["training"]["log_last_segment_loss_only"]:
-                for i in range(config["training"]["sections"] - 1, -1, -1):
-                    if masks[:, i * blocks_context:(i + 1) * blocks_context].any():
-                        last_segment_with_data = i
-                        break
             
             memory = None
             mem_tokens = model.mem_tokens.repeat(1, batch_size, 1) if model.mem_tokens is not None else None
@@ -137,7 +149,8 @@ def train():
                 m = masks[:, from_idx:to_idx].to(device)
                 
                 if mem_tokens is not None:
-                    mem_tokens = mem_tokens.detach()
+                    # Allow gradients to flow through mem_tokens across segments
+                    pass
                 
                 if memory is not None:
                     res = model(x, y_in, r, y_target, t, *memory, mem_tokens=mem_tokens, masks=m)
@@ -148,40 +161,14 @@ def train():
                 memory = res.get('new_mems', None)
                 mem_tokens = res.get('mem_tokens', None)
 
-                should_calculate_loss = (
-                    not config["training"]["log_last_segment_loss_only"] or 
-                    (last_segment_with_data != -1 and block_idx == last_segment_with_data)
-                )
-                
-                if should_calculate_loss:
-                    if config["training"]["log_last_segment_loss_only"]:
-                        logits_last_tokens = []
-                        targets_last_tokens = []
-                        pad_val = config["model"]["padding_idx"]
-
-                        for b in range(batch_size):
-                            tgt_seq = y_target[b].squeeze(-1)
-                            valid_pos = (tgt_seq != pad_val).nonzero(as_tuple=True)[0]
-                            if valid_pos.numel() == 0:
-                                continue
-                            last_idx = valid_pos[-1].item()
-                            logits_last_tokens.append(logits[b, last_idx])
-                            targets_last_tokens.append(tgt_seq[last_idx])
-
-                        if logits_last_tokens:  # list not empty
-                            logits_stack = torch.stack(logits_last_tokens, dim=0)
-                            targets_stack = torch.stack(targets_last_tokens, dim=0).long()
-                            loss = F.cross_entropy(logits_stack, targets_stack, reduction='mean')
-                            total_loss += loss
-                    else:
-                        current_mask = (y_target != config["model"]["padding_idx"]).squeeze(-1)
-                        if current_mask.any():
-                            loss = F.cross_entropy(
-                                logits[current_mask],
-                                y_target[current_mask].long().squeeze(-1),
-                                reduction='mean'
-                            )
-                            total_loss += loss
+                current_mask = (y_target != config["model"]["padding_idx"]).squeeze(-1)
+                if current_mask.any():
+                    loss = F.cross_entropy(
+                        logits[current_mask],
+                        y_target[current_mask].long().squeeze(-1),
+                        reduction='mean'
+                    )
+                    total_loss += loss
             
             if total_loss > 0:
                 optimizer.zero_grad()
@@ -192,10 +179,11 @@ def train():
                 epoch_loss += total_loss.item()
                 num_batches += 1
                 
+                # Update scheduler based on processed tokens (one step per batch)
+                scheduler.step()
+
                 tokens_processed += m.sum().item()
-                lr = config["training"]["learning_rate"]
-                
-                pbar.set_postfix({'loss': total_loss.item() / config["training"]["sections"], 'lr': lr})
+                pbar.set_postfix({'loss': total_loss.item() / config["training"]["sections"], 'lr': scheduler.get_last_lr()[0]})
         
         avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0
         print(f"Epoch {epoch+1} finished. Average Loss: {avg_epoch_loss:.4f}")

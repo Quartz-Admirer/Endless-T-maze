@@ -63,7 +63,7 @@ def evaluate(model_path, num_episodes=100, corridor_length=30, num_corridors=3):
         state = env.reset()
         done = False
         
-        all_states = [np.array([state[1], state[2], 0, np.random.randint(-1, 2)])]
+        all_states = [np.array([state[0], state[2], 0, np.random.randint(-1, 2)])]
         all_actions = [-10]
         
         target_return = torch.tensor(config["env"]["goal_reward"] * num_corridors, device=device, dtype=torch.float32).reshape(1, 1, 1)
@@ -90,24 +90,17 @@ def evaluate(model_path, num_episodes=100, corridor_length=30, num_corridors=3):
                 mem_tokens = new_mem_tokens
                 saved_context = new_context
             
-            pad_val = config["model"]["padding_idx"]
-            all_actions.append(pad_val)
-
             states_tensor = torch.from_numpy(np.array(all_states)).float().reshape(1, -1, 4).to(device)
-            actions_np = np.array(all_actions, dtype=np.int64).reshape(1, -1, 1)
+            # The model expects a start token, -10, which is the initial value in all_actions
+            actions_tensor = torch.from_numpy(np.array(all_actions, dtype=np.int64)).long().reshape(1, -1, 1).to(device)
 
-            if t == 0:
-                actions_tensor = None
-            else:
-                actions_tensor = torch.from_numpy(actions_np[:, 1:, :]).long().to(device)
-            
             action_pred, new_mem_tokens, new_context = sample_action(
                 model, states_tensor, actions_tensor, target_return, 
                 timesteps, mem_tokens, saved_context
             )
             
             action = action_pred.item()
-            all_actions[-1] = action
+            all_actions.append(action) # Simply append the new action
             
             state, reward, done, info = env.step(action)
             episode_reward += reward

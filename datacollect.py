@@ -3,17 +3,14 @@ import numpy as np
 from tqdm import tqdm
 from endless_tmaze import EndlessTMaze
 
-def oracle_policy(state, hint, corridor_length):
-    x = state[0]
-    if x < corridor_length:
-        return 3
-    else:
-        return hint # 0 for up, 1 for down
+def oracle_policy(env):
+    """Uses the environment's internal logic to get the perfect action."""
+    return env.get_optimal_action()
 
 def collect_trajectories(num_trajectories, max_corridor_length, num_corridors, seed):
     trajectories = []
     for i in tqdm(range(num_trajectories), desc="Collecting trajectories"):
-        current_corridor_length = np.random.randint(1, max_corridor_length + 1)
+        current_corridor_length = np.random.randint(3, max_corridor_length + 1)
 
         env = EndlessTMaze(
             corridor_length=current_corridor_length,
@@ -29,7 +26,7 @@ def collect_trajectories(num_trajectories, max_corridor_length, num_corridors, s
         done = False
 
         while not done:
-            action = oracle_policy(state, env.current_hint, env.corridor_length)
+            action = oracle_policy(env)
 
             flag = 1 if env.x == env.corridor_length else 0
             noise = np.random.randint(-1, 2)
